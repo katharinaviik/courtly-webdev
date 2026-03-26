@@ -4,7 +4,22 @@ A modern, real-time badminton court booking system used by both Players & Manage
 **Courtly** is designed to replace the old system of phone calls and Facebook DMs with a self-service online platform. It supports real-time availability, multi-slot booking, wallet & top-up system, and a full manager console for daily operations.
 
 ---
+## 📚 Web Development Course Project
 
+This repository is used as part of a university-level Web Development course.
+
+The project focuses on improving an existing full-stack application (Courtly) to production quality by applying concepts such as:
+
+- Continuous Integration (CI)
+- Deployment and cloud platforms (Render)
+- Observability (logging and monitoring)
+- Scalability and system reliability
+
+As part of the course requirements, the application is deployed on a different platform than the original project.
+
+The project plan and iteration details are documented in the repository Wiki. 
+
+---
 ## 📂 Repository Structure
 
 ```
