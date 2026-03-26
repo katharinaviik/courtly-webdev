@@ -45,6 +45,7 @@ jobs:
       POSTGRES_PASSWORD: postgres
       POSTGRES_HOST: 127.0.0.1
       POSTGRES_PORT: 5432
+      POSTGRES_SSL_MODE: disable
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/courtly_test
 
     steps:
