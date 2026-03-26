@@ -119,6 +119,20 @@ services:
       # Standard Node settings
       NODE_ENV: development
 
+  # ────────────────────────────────────────────────
+  # 🌐 Reverse Proxy (Nginx - Local only)
+  # ────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.local.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+
 volumes:
   courtly_pgdata:
   frontend_node_modules:
