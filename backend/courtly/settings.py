@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import environ
 import dj_database_url  # ===== Database =====
+import structlog
 
 # ===== Paths =====
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -207,3 +208,50 @@ try:
 except Exception as e:
     print(f"[Storage] ⚠️ Fallback to local FileSystemStorage: {e}")
     DEFAULT_FILE_STORAGE = "django.core.files.storage.FileSystemStorage"
+
+
+# ============================================================
+# 🪵 Structured Logging (structlog)
+# ============================================================
+timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": structlog.stdlib.ProcessorFormatter,
+            "processor": structlog.processors.JSONRenderer(),
+            "foreign_pre_chain": [
+                structlog.stdlib.add_log_level,
+                structlog.stdlib.add_logger_name,
+                timestamper,
+            ],
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}
+
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        timestamper,
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+    cache_logger_on_first_use=True,
+)

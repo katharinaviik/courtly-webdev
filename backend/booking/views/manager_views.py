@@ -1,5 +1,6 @@
 # booking/views/manager_views.py
 from django.db import transaction
+import structlog
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.decorators import api_view, permission_classes
@@ -8,6 +9,9 @@ from rest_framework.response import Response
 from ..models import Slot, SlotStatus, Booking, BookingSlot, Club
 from ..serializers import BookingCreateSerializer
 from .utils import gen_booking_no, combine_dt, calculate_able_to_cancel
+
+
+logger = structlog.get_logger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -19,6 +23,15 @@ from .utils import gen_booking_no, combine_dt, calculate_able_to_cancel
 def booking_walkin_view(request):
     role = getattr(request.user, "role", None)
     if role != "manager":
+        logger.warning(
+            "walkin_booking_forbidden",
+            event_name="booking.walkin.create",
+            user_id=request.user.id,
+            role=role,
+            method=request.method,
+            path=request.path,
+            outcome="forbidden",
+        )
         return Response({"detail": "Only manager can create walk-in booking"}, status=403)
 
     ser = BookingCreateSerializer(data=request.data)
@@ -28,10 +41,30 @@ def booking_walkin_view(request):
     items = ser.validated_data.get("items", [])
 
     if not club_id:
+        logger.warning(
+            "walkin_booking_missing_club",
+            event_name="booking.walkin.create",
+            user_id=request.user.id,
+            outcome="invalid_input",
+        )
         return Response({"detail": "club is required"}, status=400)
     if not Club.objects.filter(id=club_id).exists():
+        logger.warning(
+            "walkin_booking_club_not_found",
+            event_name="booking.walkin.create",
+            user_id=request.user.id,
+            club_id=club_id,
+            outcome="not_found",
+        )
         return Response({"detail": "Club not found"}, status=404)
     if not items:
+        logger.warning(
+            "walkin_booking_no_items",
+            event_name="booking.walkin.create",
+            user_id=request.user.id,
+            club_id=club_id,
+            outcome="invalid_input",
+        )
         return Response({"detail": "No slot items provided"}, status=400)
 
     customer_name = request.data.get("customer_name", "Walk-in Customer")
@@ -42,8 +75,23 @@ def booking_walkin_view(request):
     first_date = first_item.get("date")
     first_court = first_item.get("court")
     if not first_date or not first_court:
+        logger.warning(
+            "walkin_booking_missing_date_or_court",
+            event_name="booking.walkin.create",
+            user_id=request.user.id,
+            club_id=club_id,
+            outcome="invalid_input",
+        )
         return Response({"detail": "items[].date and items[].court are required"}, status=400)
     if first_date < timezone.localdate():
+        logger.warning(
+            "walkin_booking_past_date",
+            event_name="booking.walkin.create",
+            user_id=request.user.id,
+            club_id=club_id,
+            first_date=str(first_date),
+            outcome="invalid_input",
+        )
         return Response({"detail": f"Cannot book for a past date: {first_date}"}, status=400)
 
     booking = Booking.objects.create(
@@ -82,6 +130,15 @@ def booking_walkin_view(request):
         )
 
         if not slots:
+            logger.warning(
+                "walkin_booking_slots_not_found",
+                event_name="booking.walkin.create",
+                user_id=request.user.id,
+                club_id=club_id,
+                court_id=court_id,
+                service_date=str(d),
+                outcome="not_found",
+            )
             return Response({"detail": f"No slots found for court {court_id} @ {d}"}, status=400)
 
         for s in slots:
@@ -90,6 +147,15 @@ def booking_walkin_view(request):
                 s.refresh_from_db()
 
             if s.slot_status.status != "available":
+                logger.warning(
+                    "walkin_booking_slot_unavailable",
+                    event_name="booking.walkin.create",
+                    user_id=request.user.id,
+                    booking_id=booking.booking_no,
+                    slot_id=s.id,
+                    slot_status=s.slot_status.status,
+                    outcome="conflict",
+                )
                 return Response(
                     {"detail": f"Slot {s.id} not available", "status": s.slot_status.status},
                     status=409,
@@ -102,6 +168,17 @@ def booking_walkin_view(request):
 
     booking.total_cost = total_cost
     booking.save(update_fields=["total_cost", "customer_name", "contact_method", "contact_detail"])
+
+    logger.info(
+        "walkin_booking_created",
+        event_name="booking.walkin.create",
+        user_id=request.user.id,
+        booking_id=booking.booking_no,
+        club_id=club_id,
+        slot_count=len(created_slots),
+        total_cost=total_cost,
+        outcome="success",
+    )
 
     return Response(
         {
@@ -131,10 +208,23 @@ def booking_walkin_view(request):
 def slot_bulk_status_update_view(request):
     role = getattr(request.user, "role", None)
     if role != "manager":
+        logger.warning(
+            "slot_bulk_update_forbidden",
+            event_name="booking.slot_bulk_status.update",
+            user_id=request.user.id,
+            role=role,
+            outcome="forbidden",
+        )
         return Response({"detail": "Only managers can change status."}, status=403)
 
     items = request.data.get("items", [])
     if not items or not isinstance(items, list):
+        logger.warning(
+            "slot_bulk_update_invalid_items",
+            event_name="booking.slot_bulk_status.update",
+            user_id=request.user.id,
+            outcome="invalid_input",
+        )
         return Response({"detail": "items must be a list of {slot, status}"}, status=400)
 
     # UPDATED transitions
@@ -181,6 +271,14 @@ def slot_bulk_status_update_view(request):
 
         updated.append({"slot_id": slot_id, "new_status": new_status})
 
+    logger.info(
+        "slot_bulk_update_completed",
+        event_name="booking.slot_bulk_status.update",
+        user_id=request.user.id,
+        updated_count=len(updated),
+        error_count=len(errors),
+        outcome="success",
+    )
     return Response({"detail": "Bulk update complete", "updated": updated, "errors": errors}, status=200)
 
 
@@ -199,16 +297,39 @@ def booking_checkin_view(request, booking_no):
 
     role = getattr(request.user, "role", None)
     if role != "manager":
+        logger.warning(
+            "booking_checkin_forbidden",
+            event_name="booking.checkin",
+            user_id=request.user.id,
+            role=role,
+            booking_no=booking_no,
+            outcome="forbidden",
+        )
         return Response({"detail": "Only managers can perform check-in."}, status=403)
 
     # Step 1: Retrieve booking
     try:
         booking = Booking.objects.get(booking_no=booking_no)
     except Booking.DoesNotExist:
+        logger.warning(
+            "booking_checkin_not_found",
+            event_name="booking.checkin",
+            user_id=request.user.id,
+            booking_no=booking_no,
+            outcome="not_found",
+        )
         return Response({"detail": "Booking not found."}, status=404)
 
     # Step 2: Validate blocked states
     if booking.status in ["cancelled", "endgame", "noshow"]:
+        logger.warning(
+            "booking_checkin_invalid_state",
+            event_name="booking.checkin",
+            user_id=request.user.id,
+            booking_id=booking.booking_no,
+            booking_status=booking.status,
+            outcome="invalid_state",
+        )
         return Response(
             {"detail": f"Cannot check-in a booking that is already '{booking.status}'."},
             status=400,
@@ -219,6 +340,14 @@ def booking_checkin_view(request, booking_no):
     ALLOWED_CHECKIN = ["upcoming", "walkin"]
 
     if booking.status not in ALLOWED_CHECKIN:
+        logger.warning(
+            "booking_checkin_not_allowed_transition",
+            event_name="booking.checkin",
+            user_id=request.user.id,
+            booking_id=booking.booking_no,
+            booking_status=booking.status,
+            outcome="invalid_state",
+        )
         return Response(
             {"detail": f"Cannot check-in from status '{booking.status}'. Only upcoming or walkin allowed."},
             status=400,
@@ -241,6 +370,14 @@ def booking_checkin_view(request, booking_no):
         except SlotStatus.DoesNotExist:
             continue
 
+    logger.info(
+        "booking_checked_in",
+        event_name="booking.checkin",
+        user_id=request.user.id,
+        booking_id=booking.booking_no,
+        updated_slot_count=len(updated_slots),
+        outcome="success",
+    )
     return Response(
         {
             "booking_id": booking.booking_no,
@@ -262,6 +399,13 @@ def slot_simple_status_update_view(request):
 
     role = getattr(request.user, "role", None)
     if role != "manager":
+        logger.warning(
+            "slot_simple_update_forbidden",
+            event_name="booking.slot_simple_status.update",
+            user_id=request.user.id,
+            role=role,
+            outcome="forbidden",
+        )
         return Response({"detail": "Only managers can change slot status."}, status=403)
 
     # Validate request format using serializer
@@ -277,6 +421,13 @@ def slot_simple_status_update_view(request):
     try:
         slots = [int(s) for s in slots]
     except Exception:
+        logger.warning(
+            "slot_simple_update_non_numeric_ids",
+            event_name="booking.slot_simple_status.update",
+            user_id=request.user.id,
+            changed_to=changed_to,
+            outcome="invalid_input",
+        )
         return Response({"detail": "All slot IDs must be numeric strings or integers."}, status=400)
 
     allowed_map = {
@@ -305,6 +456,16 @@ def slot_simple_status_update_view(request):
         ss.save(update_fields=["status", "updated_at"])
         updated_count += 1
 
+    logger.info(
+        "slot_simple_update_completed",
+        event_name="booking.slot_simple_status.update",
+        user_id=request.user.id,
+        changed_to=changed_to,
+        updated_count=updated_count,
+        error_count=len(errors),
+        outcome="success",
+    )
+
     return Response(
         {
             "updated_count": updated_count,
@@ -322,6 +483,13 @@ def bookings_upcoming_view(request):
     """Managers — Get upcoming confirmed bookings only."""
     role = getattr(request.user, "role", "player")
     if role not in ["manager", "admin"]:
+        logger.warning(
+            "bookings_upcoming_forbidden",
+            event_name="booking.list_upcoming.read",
+            user_id=request.user.id,
+            role=role,
+            outcome="forbidden",
+        )
         return Response({"detail": "Forbidden"}, status=403)
 
     today = timezone.localdate()
@@ -357,4 +525,12 @@ def bookings_upcoming_view(request):
             "owner_id": b.user_id if b.user_id else None,
         })
 
+    logger.info(
+        "bookings_upcoming_read",
+        event_name="booking.list_upcoming.read",
+        user_id=request.user.id,
+        role=role,
+        result_count=len(data),
+        outcome="success",
+    )
     return Response(data, status=200)

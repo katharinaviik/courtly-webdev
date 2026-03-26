@@ -1,4 +1,5 @@
 import pytz
+import structlog
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import generics, permissions, serializers, status
@@ -12,6 +13,7 @@ from .serializers import RegisterSerializer, MeSerializer, AddCoinSerializer
 from wallet.models import Wallet
 
 User = get_user_model()
+logger = structlog.get_logger(__name__)
 
 
 # --- REGISTER ---
@@ -24,6 +26,19 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        logger.info(
+            "register_succeeded",
+            event_name="accounts.register.create",
+            username=request.data.get("username"),
+            method=request.method,
+            path=request.path,
+            status_code=response.status_code,
+            outcome="success",
+        )
+        return response
 
 
 # --- LOGIN (JWT) ---
@@ -105,10 +120,43 @@ class LoginView(TokenObtainPairView):
     permission_classes = [permissions.AllowAny]
     serializer_class = CourtlyTokenObtainPairSerializer
 
+    def post(self, request, *args, **kwargs):
+        logger.info(
+            "login_requested",
+            event_name="accounts.login.create",
+            method=request.method,
+            path=request.path,
+            username=request.data.get("username"),
+            email=request.data.get("email"),
+        )
+        response = super().post(request, *args, **kwargs)
+        user_payload = response.data.get("user") if isinstance(response.data, dict) else {}
+        logger.info(
+            "login_succeeded",
+            event_name="accounts.login.create",
+            user_id=user_payload.get("id") if isinstance(user_payload, dict) else None,
+            username=(user_payload.get("username") if isinstance(user_payload, dict) else None),
+            status_code=response.status_code,
+            outcome="success",
+        )
+        return response
+
 
 # --- TOKEN REFRESH ---
 class TokenRefreshView(DRFTokenRefresh):
     permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        logger.info(
+            "token_refreshed",
+            event_name="accounts.token.refresh",
+            method=request.method,
+            path=request.path,
+            status_code=response.status_code,
+            outcome="success",
+        )
+        return response
 
 
 # --- ME ---
@@ -132,6 +180,18 @@ class MeView(APIView):
         else:
             data["lastLogin"] = None
 
+        logger.info(
+            "me_read_succeeded",
+            event_name="accounts.me.read",
+            user_id=user.id,
+            username=user.username,
+            role=getattr(user, "role", None),
+            balance=wallet.balance,
+            method=request.method,
+            path=request.path,
+            outcome="success",
+        )
+
         return Response(data, status=status.HTTP_200_OK)
 
     # ✅ Allow updating minimal fields (avatarKey, names if needed)
@@ -139,12 +199,30 @@ class MeView(APIView):
         ser = MeSerializer(instance=request.user, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         ser.save()
+        logger.info(
+            "me_update_succeeded",
+            event_name="accounts.me.update",
+            user_id=request.user.id,
+            username=request.user.username,
+            method=request.method,
+            path=request.path,
+            outcome="success",
+        )
         return Response(ser.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         ser = MeSerializer(instance=request.user, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         ser.save()
+        logger.info(
+            "me_update_succeeded",
+            event_name="accounts.me.update",
+            user_id=request.user.id,
+            username=request.user.username,
+            method=request.method,
+            path=request.path,
+            outcome="success",
+        )
         return Response(ser.data, status=status.HTTP_200_OK)
 
 
@@ -155,6 +233,16 @@ class AddCoinView(APIView):
         ser = AddCoinSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         user = ser.save()
+        logger.info(
+            "coin_added",
+            event_name="accounts.coin.add",
+            user_id=user.id,
+            username=user.username,
+            new_balance=user.coin_balance,
+            method=request.method,
+            path=request.path,
+            outcome="success",
+        )
         return Response({"ok": True, "new_balance": user.coin_balance}, status=status.HTTP_200_OK)
 
 
@@ -166,6 +254,15 @@ class UserDetailView(APIView):
         try:
             user = User.objects.get(id=user_id)
         except User.DoesNotExist:
+            logger.warning(
+                "user_detail_not_found",
+                event_name="accounts.user_detail.read",
+                requester_id=request.user.id,
+                target_user_id=user_id,
+                method=request.method,
+                path=request.path,
+                outcome="not_found",
+            )
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
         wallet, _ = Wallet.objects.get_or_create(user=user, defaults={"balance": 1000})
@@ -180,5 +277,16 @@ class UserDetailView(APIView):
             data["lastLogin"] = local_time.strftime("%Y-%m-%d %H:%M:%S")
         else:
             data["lastLogin"] = None
+
+        logger.info(
+            "user_detail_read_succeeded",
+            event_name="accounts.user_detail.read",
+            requester_id=request.user.id,
+            target_user_id=user.id,
+            target_username=user.username,
+            method=request.method,
+            path=request.path,
+            outcome="success",
+        )
 
         return Response(data, status=status.HTTP_200_OK)

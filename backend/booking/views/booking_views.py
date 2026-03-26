@@ -1,4 +1,5 @@
 from django.db import transaction
+import structlog
 from ..models import Slot, SlotStatus, Booking, BookingSlot
 from core.models import Club
 from wallet.models import Wallet, CoinLedger
@@ -10,6 +11,9 @@ from rest_framework import status, permissions
 from .utils import gen_booking_no, calculate_able_to_cancel
 
 
+logger = structlog.get_logger(__name__)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4) GET /api/booking/<booking_id>/   (Authenticated: Manager or Owner)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -19,10 +23,30 @@ def booking_detail_view(request, booking_no: str):
     try:
         b = Booking.objects.select_related("user").get(booking_no=booking_no)
     except Booking.DoesNotExist:
+        logger.warning(
+            "booking_detail_not_found",
+            event_name="booking.detail.read",
+            booking_no=booking_no,
+            requester_id=request.user.id,
+            method=request.method,
+            path=request.path,
+            outcome="not_found",
+        )
         return Response({"detail": "Not found"}, status=404)
 
     user_role = getattr(request.user, "role", None)
     if b.user != request.user and user_role not in ["manager", "admin"]:
+        logger.warning(
+            "booking_detail_forbidden",
+            event_name="booking.detail.read",
+            booking_no=booking_no,
+            requester_id=request.user.id,
+            requester_role=user_role,
+            owner_id=b.user_id,
+            method=request.method,
+            path=request.path,
+            outcome="forbidden",
+        )
         return Response({"detail": "Forbidden"}, status=403)
 
     slots = (
@@ -69,6 +93,19 @@ def booking_detail_view(request, booking_no: str):
         "booking_slots": booking_slots,
     }
 
+    logger.info(
+        "booking_detail_read",
+        event_name="booking.detail.read",
+        booking_id=b.booking_no,
+        requester_id=request.user.id,
+        requester_role=user_role,
+        slot_count=len(booking_slots),
+        booking_status=b.status,
+        total_cost=b.total_cost or 0,
+        method=request.method,
+        path=request.path,
+        outcome="success",
+    )
     return Response(payload, status=200)
 
 
@@ -109,12 +146,40 @@ def booking_create_view(request):
 
     # Validate club and slots
     if not club_id:
+        logger.warning(
+            "booking_create_missing_club",
+            event_name="booking.create",
+            user_id=request.user.id,
+            role=user_role,
+            method=request.method,
+            path=request.path,
+            outcome="invalid_input",
+        )
         return Response({"detail": "club is required"}, status=400)
 
     if not slots_in or not isinstance(slots_in, list):
+        logger.warning(
+            "booking_create_invalid_slots",
+            event_name="booking.create",
+            user_id=request.user.id,
+            role=user_role,
+            method=request.method,
+            path=request.path,
+            outcome="invalid_input",
+        )
         return Response({"detail": "slots must be a non-empty list"}, status=400)
 
     if not Club.objects.filter(id=club_id).exists():
+        logger.warning(
+            "booking_create_club_not_found",
+            event_name="booking.create",
+            user_id=request.user.id,
+            role=user_role,
+            club_id=club_id,
+            method=request.method,
+            path=request.path,
+            outcome="not_found",
+        )
         return Response({"detail": "Club not found"}, status=404)
 
     # Fetch all requested slots
@@ -126,6 +191,17 @@ def booking_create_view(request):
     )
 
     if not qs.exists():
+        logger.warning(
+            "booking_create_slots_not_found",
+            event_name="booking.create",
+            user_id=request.user.id,
+            role=user_role,
+            club_id=club_id,
+            requested_slots=len(slots_in),
+            method=request.method,
+            path=request.path,
+            outcome="not_found",
+        )
         return Response({"detail": "No valid slots found"}, status=404)
 
     first_slot = qs.first()
@@ -135,6 +211,18 @@ def booking_create_view(request):
     for s in qs:
         status_val = getattr(getattr(s, "slot_status", None), "status", "available")
         if status_val != "available":
+            logger.warning(
+                "booking_create_slot_unavailable",
+                event_name="booking.create",
+                user_id=request.user.id,
+                role=user_role,
+                club_id=club_id,
+                slot_id=s.id,
+                slot_status=status_val,
+                method=request.method,
+                path=request.path,
+                outcome="conflict",
+            )
             return Response({"detail": f"Slot {s.id} not available"}, status=409)
 
         total_cost += s.price_coins
@@ -144,6 +232,17 @@ def booking_create_view(request):
         wallet, _ = Wallet.objects.get_or_create(user=request.user, defaults={"balance": 0})
 
         if wallet.balance < total_cost:
+            logger.warning(
+                "booking_create_insufficient_balance",
+                event_name="booking.create",
+                user_id=request.user.id,
+                role=user_role,
+                required=total_cost,
+                balance=wallet.balance,
+                method=request.method,
+                path=request.path,
+                outcome="insufficient_balance",
+            )
             return Response(
                 {"detail": "Insufficient balance", "required": total_cost, "balance": wallet.balance},
                 status=402,
@@ -214,6 +313,20 @@ def booking_create_view(request):
     booking.total_cost = total_cost
     booking.save(update_fields=["total_cost"])
 
+    logger.info(
+        "booking_created",
+        event_name="booking.create",
+        booking_id=booking.booking_no,
+        user_id=request.user.id,
+        role=user_role,
+        club_id=club_id,
+        slot_count=len(created_slot_ids),
+        total_cost=total_cost,
+        booking_method=booking_method,
+        payment_method=payment_method,
+        outcome="success",
+    )
+
     return Response(
         {
             "booking_id": booking.booking_no,
@@ -235,6 +348,15 @@ def bookings_all_view(request):
     """Managers/Admins — Get all bookings in the system."""
     role = getattr(request.user, "role", "player")
     if role not in ["manager", "admin"]:
+        logger.warning(
+            "bookings_all_forbidden",
+            event_name="booking.list_all.read",
+            requester_id=request.user.id,
+            requester_role=role,
+            method=request.method,
+            path=request.path,
+            outcome="forbidden",
+        )
         return Response({"detail": "Forbidden"}, status=403)
 
     qs = Booking.objects.all().select_related("user").order_by("-created_at")[:200]
@@ -264,6 +386,16 @@ def bookings_all_view(request):
             "owner_username": b.user.username if b.user_id else (b.customer_name or "Unknown"),
         })
 
+    logger.info(
+        "bookings_all_read",
+        event_name="booking.list_all.read",
+        requester_id=request.user.id,
+        requester_role=role,
+        result_count=len(data),
+        method=request.method,
+        path=request.path,
+        outcome="success",
+    )
     return Response(data, status=200)
 
 
@@ -297,6 +429,15 @@ def bookings_my_view(request):
             "owner_id": b.user_id,
         })
 
+    logger.info(
+        "bookings_my_read",
+        event_name="booking.list_my.read",
+        user_id=request.user.id,
+        result_count=len(data),
+        method=request.method,
+        path=request.path,
+        outcome="success",
+    )
     return Response(data, status=200)
 
 
@@ -310,13 +451,42 @@ def booking_cancel_view(request, booking_no: str):
     try:
         booking = Booking.objects.get(booking_no=booking_no)
     except Booking.DoesNotExist:
+        logger.warning(
+            "booking_cancel_not_found",
+            event_name="booking.cancel",
+            booking_no=booking_no,
+            requester_id=request.user.id,
+            method=request.method,
+            path=request.path,
+            outcome="not_found",
+        )
         return Response({"detail": "Booking not found"}, status=404)
 
     role = getattr(request.user, "role", None)
     if booking.user != request.user and role != "manager":
+        logger.warning(
+            "booking_cancel_forbidden",
+            event_name="booking.cancel",
+            booking_id=booking.booking_no,
+            requester_id=request.user.id,
+            requester_role=role,
+            owner_id=booking.user_id,
+            method=request.method,
+            path=request.path,
+            outcome="forbidden",
+        )
         return Response({"detail": "No permission to cancel"}, status=403)
 
     if booking.status == "cancelled":
+        logger.warning(
+            "booking_cancel_already_cancelled",
+            event_name="booking.cancel",
+            booking_id=booking.booking_no,
+            requester_id=request.user.id,
+            method=request.method,
+            path=request.path,
+            outcome="invalid_state",
+        )
         return Response({"detail": "Already cancelled"}, status=400)
 
     slots = (
@@ -324,12 +494,31 @@ def booking_cancel_view(request, booking_no: str):
         .select_related("slot", "slot__court", "slot__slot_status")
     )
     if not slots.exists():
+        logger.warning(
+            "booking_cancel_missing_slots",
+            event_name="booking.cancel",
+            booking_id=booking.booking_no,
+            requester_id=request.user.id,
+            method=request.method,
+            path=request.path,
+            outcome="invalid_state",
+        )
         return Response({"detail": "No slot info found"}, status=400)
 
     # 24h rule
     first_slot = slots.first()
     if not calculate_able_to_cancel(first_slot):
         slot_local = timezone.localtime(first_slot.slot.start_at)
+        logger.warning(
+            "booking_cancel_24h_rule_blocked",
+            event_name="booking.cancel",
+            booking_id=booking.booking_no,
+            requester_id=request.user.id,
+            start_time=slot_local.strftime("%Y-%m-%d %H:%M"),
+            method=request.method,
+            path=request.path,
+            outcome="policy_blocked",
+        )
         return Response(
             {
                 "detail": "Cannot cancel within 24 hours of start time",
@@ -361,6 +550,18 @@ def booking_cancel_view(request, booking_no: str):
     CoinLedger.objects.create(user=booking.user, type="refund", amount=refund, ref_booking=booking)
 
     # Spec-compliant response
+    logger.info(
+        "booking_cancelled",
+        event_name="booking.cancel",
+        booking_id=booking.booking_no,
+        requester_id=request.user.id,
+        requester_role=role,
+        refund_coins=refund,
+        method=request.method,
+        path=request.path,
+        outcome="success",
+    )
+
     return Response(
         {
             "booking_id": booking.booking_no,
@@ -408,4 +609,13 @@ def my_booking_upcoming_view(request):
             "owner_id": b.user_id,
         })
 
+    logger.info(
+        "my_upcoming_bookings_read",
+        event_name="booking.list_my_upcoming.read",
+        user_id=request.user.id,
+        result_count=len(data),
+        method=request.method,
+        path=request.path,
+        outcome="success",
+    )
     return Response(data, status=200)
