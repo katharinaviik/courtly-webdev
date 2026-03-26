@@ -19,6 +19,12 @@ As part of the course requirements, the application is deployed on a different p
 
 The project plan and iteration details are documented in the repository Wiki. 
 
+## 🔗 Project Origin
+
+This project is based on the original Courtly application, which was developed as a team project in ISP course.
+
+This repository is an independently developed version used for a Web Development course, focusing on improving the system to production quality.
+
 ---
 ## 📂 Repository Structure
 
