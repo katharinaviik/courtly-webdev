@@ -1,0 +1,6 @@
+1. docker build -f Dockerfile.db -t auth-db .
+2. docker build -f Dockerfile.auth -t authentik .  
+3. docker build -f Dockerfile.authworker -t authentik-worker .
+4. docker run -d --name auth-db --network auth-net -p 8120:8123  auth-db 
+5. docker run -d --name authentik --network auth-net -p 8125:8125 -p 8124:8124  authentik server
+6. docker run -d --name authentik-worker --network auth-net authentik-worker worker
